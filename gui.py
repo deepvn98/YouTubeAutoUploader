@@ -399,7 +399,23 @@ class AutoYoutubeApp(ttk.Window):
         stat = ttk.Label(fr, text="Ready", foreground="gray", width=22, anchor="center"); stat.pack(side=LEFT, padx=5)
         
         pe = threading.Event(); pe.set()
-        bp = ttk.Button(fr, text="⏸", width=4, bootstyle="primary", state="disabled", command=lambda: [pe.clear() if pe.is_set() else pe.set()])
+        
+        # --- LOGIC MỚI: PAUSE CÓ PHẢN HỒI NGAY LẬP TỨC ---
+        def toggle_pause():
+            if pe.is_set():
+                # Nếu đang chạy -> Bấm để Tạm dừng
+                pe.clear()
+                bp.config(text="▶", bootstyle="warning") # Đổi sang màu vàng, icon Play
+                stat.config(text="Pausing...", foreground="#ffc107") # Báo hiệu ngay
+                self.log(f"Row {idx}: Pause requested.", tag="INFO")
+            else:
+                # Nếu đang dừng -> Bấm để Tiếp tục
+                pe.set()
+                bp.config(text="⏸", bootstyle="primary") # Đổi về màu xanh
+                stat.config(text="Resuming...", foreground="#007bff")
+                self.log(f"Row {idx}: Resumed.", tag="INFO")
+
+        bp = ttk.Button(fr, text="⏸", width=4, bootstyle="primary", state="disabled", command=toggle_pause)
         bp.pack(side=LEFT, padx=2)
         
         def dele(): 

@@ -113,7 +113,17 @@ def execute_upload(youtube, video_data, publish_time, specific_category, progres
         for k, v in YT_LOCATIONS.items():
             if k in loc_key or loc_key in k: loc_data = v; break
 
-    log_func(f"   -> Info: {lang_code} | {loc_data['desc']} | Cat: {final_cat}")
+    # --- LOGIC MỚI: TÌM TÊN CATEGORY TỪ ID ---
+    cat_name_display = str(final_cat) # Mặc định hiển thị số ID nếu không tìm thấy tên
+    for name, cid in YT_CATEGORIES.items():
+        # So sánh ID (chuyển về string để chắc chắn khớp)
+        if str(cid) == str(final_cat):
+            cat_name_display = name
+            break
+    # -----------------------------------------
+
+    # Thay {final_cat} bằng {cat_name_display}
+    log_func(f"   -> Info: {lang_code} | {loc_data['desc']} | Cat: {cat_name_display}")
     
     body = {
         "snippet": {
