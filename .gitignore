@@ -1,0 +1,29 @@
+# --- Python Compiled Files (File hệ thống Python tự sinh ra) ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# --- Sensitive Data (QUAN TRỌNG: Không được public cái này) ---
+client_secrets/
+user_tokens/
+firebase_key.json
+license.key
+
+# --- Local App State (File lưu cấu hình/trạng thái người dùng) ---
+grid_state.json
+settings.json
+*.log
+
+# --- Virtual Environment (Môi trường ảo nếu có dùng) ---
+venv/
+env/
+.venv/
+
+# --- IDE Settings (Cấu hình VS Code) ---
+.vscode/
+.idea/
+
+# --- OS generated files ---
+.DS_Store
+Thumbs.db
