@@ -628,22 +628,115 @@ class AutoYoutubeApp(ttk.Window):
         rf()
 
     def open_admin_panel(self):
-        if self.focus_or_create(self.win_admin_manager): return
-        w = self.win_admin_manager = ttk.Toplevel(self); w.title("Admin"); w.geometry("400x500"); self._center_window(w)
-        lf = ScrolledFrame(w, height=300); lf.pack(fill=BOTH, expand=True, padx=10)
-        def rf():
-            for c in lf.winfo_children(): c.destroy()
-            d = license_manager.get_all_licenses()
-            for k in d.keys():
-                r = ttk.Frame(lf); r.pack(fill=X, pady=2)
-                ttk.Label(r, text=k, width=30).pack(side=LEFT)
-                ttk.Button(r, text="X", width=3, command=lambda k=k: [license_manager.delete_license(k), rf()]).pack(side=RIGHT)
-        def ad():
-            k = self.popup_input("New", "Key:"); 
-            if k: license_manager.add_license(k); rf()
-        ttk.Button(w, text="Refresh", command=rf).pack(pady=5)
-        ttk.Button(w, text="+ Add", command=ad).pack(pady=5)
-        rf()
+            if self.focus_or_create(self.win_admin_manager): return
+            
+            # 1. Cấu hình cửa sổ
+            w = self.win_admin_manager = ttk.Toplevel(self)
+            w.title("License Manager (Admin)")
+            w.geometry("500x600")
+            self._center_window(w)
+            
+            # 2. Header: Tiêu đề và Nút chức năng
+            header_fr = ttk.Frame(w, padding=15, bootstyle="secondary")
+            header_fr.pack(fill=X)
+            
+            ttk.Label(header_fr, text="FIREBASE KEYS", font=("Helvetica", 12, "bold"), bootstyle="inverse-secondary").pack(side=LEFT)
+            
+            btn_fr = ttk.Frame(header_fr, bootstyle="secondary")
+            btn_fr.pack(side=RIGHT)
+            
+            # 3. Loading Bar (Mặc định ẩn)
+            progress = ttk.Progressbar(w, mode='indeterminate', bootstyle="success-striped")
+            
+            # 4. Khu vực hiển thị danh sách (Cuộn)
+            body_fr = ScrolledFrame(w, autohide=True)
+            body_fr.pack(fill=BOTH, expand=True, padx=10, pady=10)
+            
+            lbl_status = ttk.Label(w, text="Ready", font=("Segoe UI", 9), anchor="e", padding=(10, 5))
+            lbl_status.pack(fill=X, side=BOTTOM)
+
+            # --- CÁC HÀM XỬ LÝ LOGIC (THREADING) ---
+            
+            def render_list(data):
+                """Hàm vẽ lại giao diện sau khi tải dữ liệu xong (Chạy trên UI Thread)"""
+                progress.stop()
+                progress.pack_forget()
+                
+                # Xóa cũ
+                for c in body_fr.winfo_children(): c.destroy()
+                
+                if not data:
+                    ttk.Label(body_fr, text="No licenses found or Connection error.", foreground="gray").pack(pady=20)
+                    lbl_status.config(text="Total: 0 keys")
+                    return
+
+                lbl_status.config(text=f"Total: {len(data)} keys")
+                
+                # Vẽ từng dòng (Row Design)
+                for idx, key in enumerate(data.keys()):
+                    # Khung thẻ bài (Card)
+                    card = ttk.Frame(body_fr, bootstyle="light", padding=5)
+                    card.pack(fill=X, pady=3, padx=5)
+                    
+                    # STT
+                    ttk.Label(card, text=f"#{idx+1}", width=4, foreground="gray").pack(side=LEFT)
+                    
+                    # Key Value (Copyable Entry)
+                    ent = ttk.Entry(card, bootstyle="secondary", width=35)
+                    ent.insert(0, key)
+                    ent.config(state="readonly") # Chỉ đọc để copy
+                    ent.pack(side=LEFT, fill=X, expand=True, padx=5)
+                    
+                    # Nút Xóa
+                    def _del_action(k=key):
+                        if self.popup_confirm("Delete Key", f"Are you sure you want to delete:\n{k}?"):
+                            threading.Thread(target=lambda: delete_thread(k)).start()
+
+                    ttk.Button(card, text="🗑", bootstyle="danger-outline", width=4, command=_del_action).pack(side=RIGHT)
+
+            def load_data_thread():
+                """Hàm tải dữ liệu chạy ngầm"""
+                self.after(0, lambda: [progress.pack(fill=X), lbl_status.config(text="Loading from Firebase...")])
+                progress.start(10)
+                try:
+                    # Giả lập delay xíu cho mượt nếu mạng quá nhanh
+                    data = license_manager.get_all_licenses()
+                    self.after(0, lambda: render_list(data))
+                except Exception as e:
+                    self.after(0, lambda: [progress.stop(), progress.pack_forget(), self.popup_error("Connection Error", str(e))])
+
+            def add_thread(new_key):
+                """Hàm thêm key chạy ngầm"""
+                self.after(0, lambda: [progress.pack(fill=X), progress.start(10)])
+                try:
+                    license_manager.add_license(new_key)
+                    self.after(0, lambda: [self.popup_info("Success", f"Added key: {new_key}"), load_data_thread()])
+                except Exception as e:
+                    self.after(0, lambda: [progress.stop(), self.popup_error("Error", str(e))])
+
+            def delete_thread(target_key):
+                """Hàm xóa key chạy ngầm"""
+                self.after(0, lambda: [progress.pack(fill=X), progress.start(10)])
+                try:
+                    license_manager.delete_license(target_key)
+                    self.after(0, lambda: load_data_thread())
+                except Exception as e:
+                    self.after(0, lambda: [progress.stop(), self.popup_error("Error", str(e))])
+
+            # --- NÚT CHỨC NĂNG ---
+            def on_refresh():
+                threading.Thread(target=load_data_thread, daemon=True).start()
+                
+            def on_add():
+                k = self.popup_input("Generate License", "Enter new License Key:")
+                if k:
+                    threading.Thread(target=lambda: add_thread(k.strip()), daemon=True).start()
+
+            ttk.Button(btn_fr, text="↻ Refresh", bootstyle="info", command=on_refresh).pack(side=LEFT, padx=5)
+            ttk.Button(btn_fr, text="+ Add Key", bootstyle="success", command=on_add).pack(side=LEFT, padx=5)
+
+            # Tải dữ liệu lần đầu
+            on_refresh()
 
     # =========================================================================
     # EXECUTION
