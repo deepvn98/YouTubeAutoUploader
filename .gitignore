@@ -9,7 +9,7 @@ client_secrets/
 user_tokens/
 firebase_key.json
 license.key
-
+config.py
 # --- Local App State (File lưu cấu hình/trạng thái người dùng) ---
 grid_state.json
 settings.json
