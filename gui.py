@@ -270,7 +270,6 @@ class AutoYoutubeApp(ttk.Window):
     # =========================================================================
     def add_row(self, initial_data=None):
         idx = len(self.row_frames) + 1
-        # Nếu initial_data là None (người dùng bấm nút +), dùng dict rỗng
         data = initial_data if initial_data else {}
         
         fr = ttk.Frame(self.scroll_frame, padding=(0, 2)); fr.pack(fill=X)
@@ -279,27 +278,17 @@ class AutoYoutubeApp(ttk.Window):
         ttk.Checkbutton(fr, variable=chk_var, command=self.update_master_state).pack(side=LEFT, padx=(5, 10))
         lbl_idx = ttk.Label(fr, text=str(idx), width=3, anchor="center"); lbl_idx.pack(side=LEFT)
         
-        # --- 1. SECRET (FIX AN TOÀN) ---
+        # --- 1. SECRET ---
         sec_cb = ttk.Combobox(fr, state="readonly", width=28); sec_cb.pack(side=LEFT, padx=2)
-        # Lấy danh sách file, nếu thư mục chưa có gì thì trả về list rỗng []
-        try:
-            sec_files = [os.path.basename(f) for f in glob.glob(os.path.join(config.SECRET_DIR, "*.json"))]
-        except:
-            sec_files = []
-        
+        try: sec_files = [os.path.basename(f) for f in glob.glob(os.path.join(config.SECRET_DIR, "*.json"))]
+        except: sec_files = []
         sec_cb['values'] = sec_files
-        
-        # Chỉ set giá trị nếu dữ liệu cũ có tồn tại VÀ nằm trong danh sách file hiện có
         saved_sec = data.get('secret')
-        if saved_sec and saved_sec in sec_files: 
-            sec_cb.set(saved_sec)
-        # -------------------------------
+        if saved_sec and saved_sec in sec_files: sec_cb.set(saved_sec)
         
-        # --- 2. FOLDER (FIX AN TOÀN) ---
+        # --- 2. FOLDER ---
         fol_ent = ttk.Entry(fr, width=38); fol_ent.pack(side=LEFT, padx=2)
-        # Entry.insert không chịu được giá trị None, phải đổi về chuỗi rỗng ""
-        saved_folder = data.get('folder') or "" 
-        fol_ent.insert(0, saved_folder)
+        fol_ent.insert(0, data.get('folder') or "")
         
         def validate_folder(event):
             path = fol_ent.get().strip()
@@ -308,160 +297,268 @@ class AutoYoutubeApp(ttk.Window):
                 current_norm = os.path.normpath(path).lower()
                 for r in self.row_frames:
                     if r['folder'] != fol_ent and r['folder'].get():
-                        other_norm = os.path.normpath(r['folder'].get()).lower()
-                        if current_norm == other_norm:
-                            self.popup_error("Duplicate Folder", f"Folder is already used in Row {r['lbl_idx'].cget('text')}.")
-                            fol_ent.delete(0, tk.END)
-                            return
+                        if os.path.normpath(r['folder'].get()).lower() == current_norm:
+                            self.popup_error("Duplicate Folder", f"Folder used in Row {r['lbl_idx'].cget('text')}.")
+                            fol_ent.delete(0, tk.END); return
             except: pass
-            
         fol_ent.bind("<FocusOut>", validate_folder)
         ttk.Button(fr, text="📂", width=3, bootstyle="primary-outline", command=lambda: self.browse_folder(fol_ent, idx)).pack(side=LEFT, padx=(0,5))
-        # -------------------------------
 
-        # --- 3. ACCOUNT & PLAYLIST (FIX AN TOÀN) ---
+        # --- 3. ACCOUNT & PLAYLIST (MULTI-SELECT) ---
         acc_cb = ttk.Combobox(fr, state="readonly", width=28); acc_cb.pack(side=LEFT, padx=2)
-        playlist_cb = ttk.Combobox(fr, state="readonly", width=23); playlist_cb.pack(side=LEFT, padx=2)
-        playlist_map = {} 
+        playlist_ent = ttk.Entry(fr, state="readonly", width=25); playlist_ent.pack(side=LEFT, padx=2)
+        
+        # Biến quan trọng: Lưu danh sách playlist
+        row_data = {'playlist_map': {}, 'selected_playlists': {}}
 
         def update_acc_list(e=None):
             sec = sec_cb.get()
-            if not sec: 
-                acc_cb['values'] = []
-                return
-            
+            if not sec: acc_cb['values'] = []; return
             cid = youtube_api.get_client_id_from_file(sec)
-            potential_accs = []
+            valid = []
             if cid:
-                # Dùng glob an toàn
-                token_files = glob.glob(os.path.join(config.TOKEN_DIR, "*.json"))
-                for f in token_files:
+                for f in glob.glob(os.path.join(config.TOKEN_DIR, "*.json")):
                     try:
-                        if json.load(open(f)).get("client_id") == cid: 
-                            potential_accs.append(os.path.basename(f))
+                        if json.load(open(f)).get("client_id") == cid: valid.append(os.path.basename(f))
                     except: pass
+            used = {r['acc'].get() for r in self.row_frames if r['acc'] != acc_cb and r['acc'].get()}
+            acc_cb['values'] = [a for a in valid if a not in used]
+
+        # --- HÀM BẬT CỬA SỔ CHỌN PLAYLIST (PHIÊN BẢN PRO) ---
+        # --- HÀM BẬT CỬA SỔ CHỌN PLAYLIST (FIX TRIỆT ĐỂ BẰNG ALPHA CHANNEL) ---
+        def open_playlist_selector(e=None):
+            # 1. Kiểm tra điều kiện (Logic cũ)
+            if not row_data['playlist_map']:
+                status = playlist_ent.get()
+                if status in ["Loading...", "Login Error", "API Error"]: return
+                if not acc_cb.get(): 
+                    self.popup_error("Error", "Select Account first.")
+                    return
+                self.popup_error("Info", "No playlists found.")
+                return
+
+            # 2. Tạo cửa sổ và TÀNG HÌNH NGAY LẬP TỨC
+            p = ttk.Toplevel(self)
+            p.attributes('-alpha', 0.0) # Độ trong suốt = 0 (Tàng hình)
+            # Lưu ý: Không dùng withdraw() nữa để tránh xung đột animation
             
-            used_elsewhere = set()
-            for r in self.row_frames:
-                if r['acc'] != acc_cb: 
-                    val = r['acc'].get()
-                    if val: used_elsewhere.add(val)
+            p.title("Playlist Selector")
             
-            final_values = [acc for acc in potential_accs if acc not in used_elsewhere]
-            acc_cb['values'] = final_values
+            # 3. Xây dựng giao diện
+            # --- HEADER ---
+            head_fr = ttk.Frame(p, padding=10)
+            head_fr.pack(fill=X)
+            
+            search_var = tk.StringVar()
+            entry_search = ttk.Entry(head_fr, textvariable=search_var, font=("Segoe UI", 10))
+            entry_search.pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
+            entry_search.insert(0, "Search...")
+            
+            def on_focus_in(e):
+                if entry_search.get() == "Search...": entry_search.delete(0, tk.END)
+            entry_search.bind("<FocusIn>", on_focus_in)
+
+            # --- BODY ---
+            body_fr = ScrolledFrame(p, autohide=True)
+            body_fr.pack(fill=BOTH, expand=True, padx=10)
+            
+            # --- FOOTER ---
+            foot_fr = ttk.Frame(p, padding=10, bootstyle="light")
+            foot_fr.pack(fill=X, side=BOTTOM)
+            
+            lbl_count = ttk.Label(foot_fr, text="Selected: 0", font=("Bold", 10), bootstyle="inverse-light")
+            lbl_count.pack(side=LEFT)
+
+            # --- LOGIC DỮ LIỆU & VẼ LIST ---
+            vars_map = {} 
+            for name, pid in row_data['playlist_map'].items():
+                is_selected = pid in row_data['selected_playlists']
+                vars_map[pid] = tk.BooleanVar(value=is_selected)
+
+            def update_count():
+                cnt = sum(1 for v in vars_map.values() if v.get())
+                lbl_count.config(text=f"Selected: {cnt}")
+
+            def render_list(filter_text=""):
+                for widget in body_fr.winfo_children(): widget.destroy()
+                filter_text = filter_text.lower() if filter_text != "search..." else ""
+                
+                items_to_draw = []
+                for name, pid in row_data['playlist_map'].items():
+                    if filter_text and filter_text not in name.lower(): continue
+                    items_to_draw.append((name, pid))
+                
+                for name, pid in items_to_draw:
+                    row = ttk.Frame(body_fr, padding=(5, 5))
+                    row.pack(fill=X, pady=1)
+                    
+                    var = vars_map[pid]
+                    chk = ttk.Checkbutton(row, text=name, variable=var, command=update_count)
+                    chk.pack(side=LEFT, fill=X, expand=True)
+                    
+                    row.bind("<Enter>", lambda e, r=row: r.configure(bootstyle="info"))
+                    row.bind("<Leave>", lambda e, r=row: r.configure(bootstyle="default"))
+                    
+                    def toggle(e, v=var): v.set(not v.get()); update_count()
+                    row.bind("<Button-1>", toggle)
+
+            search_var.trace("w", lambda *args: render_list(search_var.get()))
+
+            # --- NÚT BẤM ---
+            def select_all():
+                for v in vars_map.values(): v.set(True)
+                update_count()
+            def clear_all():
+                for v in vars_map.values(): v.set(False)
+                update_count()
+
+            btn_all = ttk.Button(head_fr, text="All", width=4, bootstyle="secondary-outline", command=select_all)
+            btn_all.pack(side=RIGHT)
+            ttk.Button(head_fr, text="None", width=5, bootstyle="secondary-outline", command=clear_all).pack(side=RIGHT, padx=2)
+
+            def save_selection():
+                new_selected = {}
+                display_names = []
+                
+                # Tạo bản đồ ngược ID -> Name để tra cứu
+                id_to_name = {}
+                for name, pid in row_data['playlist_map'].items():
+                    id_to_name[pid] = name
+
+                for pid, var in vars_map.items():
+                    if var.get():
+                        # Lấy tên từ map ngược, nếu không có thì để Unknown
+                        name = id_to_name.get(pid, "Unknown Playlist")
+                        new_selected[pid] = name
+                        display_names.append(name)
+                
+                # Cập nhật dữ liệu vào biến chính
+                row_data['selected_playlists'] = new_selected
+                
+                # Cập nhật text hiển thị ra ô Entry bên ngoài
+                playlist_ent.config(state="normal"); playlist_ent.delete(0, tk.END)
+                if not display_names: 
+                    playlist_ent.insert(0, "No Playlist")
+                elif len(display_names) == 1: 
+                    playlist_ent.insert(0, display_names[0])
+                else: 
+                    playlist_ent.insert(0, f"{len(display_names)} Playlists selected")
+                playlist_ent.config(state="readonly")
+                
+                p.destroy()
+
+            ttk.Button(foot_fr, text="SAVE SELECTION", bootstyle="success", command=save_selection).pack(side=RIGHT)
+
+            # Vẽ giao diện xong xuôi
+            render_list()
+            update_count()
+            
+            # 4. TÍNH TOÁN VỊ TRÍ & HIỆN HÌNH (Magic step)
+            # Ép hệ thống tính toán xong layout
+            p.update_idletasks() 
+            
+            width = 450
+            height = 550
+            screen_width = self.winfo_screenwidth()
+            screen_height = self.winfo_screenheight()
+            x = (screen_width // 2) - (width // 2)
+            y = (screen_height // 2) - (height // 2)
+            
+            # Đặt vị trí
+            p.geometry(f"{width}x{height}+{x}+{y}")
+            
+            # HIỆN NGUYÊN HÌNH (Chuyển alpha từ 0 -> 1)
+            p.attributes('-alpha', 1.0) 
+            
+            # 5. Cài đặt Modal
+            p.transient(self)
+            p.grab_set()
+            p.focus_set()
+            self.wait_window(p)
 
         def load_pl(acc, sec):
             if not acc or not sec: return
-            playlist_cb.set("Loading...")
-            playlist_cb['values'] = ["Loading..."]
-            
+            playlist_ent.config(state="normal"); playlist_ent.delete(0, tk.END); playlist_ent.insert(0, "Loading..."); playlist_ent.config(state="readonly")
             def t():
                 try:
                     yt = youtube_api.get_authenticated_service(acc, sec)
-                    if yt:
-                        pls = youtube_api.get_user_playlists(yt)
-                        self.after(0, lambda: _apply_pl(pls))
-                    else:
-                        self.after(0, lambda: [playlist_cb.set("Login Error"), playlist_cb.configure(values=[])])
-                except Exception as e:
-                    print(f"Error loading playlist: {e}")
-                    self.after(0, lambda: playlist_cb.set("API Error"))
-
-            def _apply_pl(pls):
-                playlist_cb['values'] = ["No Playlist"] + list(pls.keys())
-                row_widgets['playlist_map'] = pls
-                found = False
-                saved_id = data.get('playlist_id')
-                if saved_id:
-                    for name, pid in pls.items():
-                        if pid == saved_id:
-                            playlist_cb.set(name); found = True; break
-                if not found:
-                    saved_name = data.get('playlist_name')
-                    if saved_name and saved_name in pls:
-                        playlist_cb.set(saved_name); found = True
-                if not found:
-                    if data.get('playlist_name') == "No Playlist" or not data.get('playlist_name'):
-                        playlist_cb.set("No Playlist")
-                    else:
-                        playlist_cb.set(data.get('playlist_name', ''))
+                    if yt: self.after(0, lambda: _apply(youtube_api.get_user_playlists(yt)))
+                    else: self.after(0, lambda: _err("Login Error"))
+                except: self.after(0, lambda: _err("API Error"))
             
+            def _err(tx):
+                playlist_ent.config(state="normal"); playlist_ent.delete(0, tk.END); playlist_ent.insert(0, tx); playlist_ent.config(state="readonly")
+
+            def _apply(pls):
+                row_data['playlist_map'] = pls
+                saved_ids = data.get('playlist_ids', []) or ([data.get('playlist_id')] if data.get('playlist_id') else [])
+                cur_sel = {pid: name for name, pid in pls.items() if pid in saved_ids}
+                row_data['selected_playlists'] = cur_sel
+                names = list(cur_sel.values())
+                playlist_ent.config(state="normal"); playlist_ent.delete(0, tk.END)
+                if not names: playlist_ent.insert(0, "No Playlist")
+                elif len(names) == 1: playlist_ent.insert(0, names[0])
+                else: playlist_ent.insert(0, f"{len(names)} Playlists selected")
+                playlist_ent.config(state="readonly")
             threading.Thread(target=t, daemon=True).start()
 
-        def on_acc_select(event):
+        def on_acc_select(e):
             val = acc_cb.get()
             if not val: return
             for r in self.row_frames:
                 if r['acc'] != acc_cb and r['acc'].get() == val:
-                    self.popup_error("Duplicate Error", f"Account '{val}' is already used in Row {r['lbl_idx'].cget('text')}.")
-                    acc_cb.set(''); playlist_cb.set(''); playlist_cb['values'] = []
+                    self.popup_error("Duplicate", f"Account '{val}' used."); acc_cb.set(''); 
+                    playlist_ent.config(state="normal"); playlist_ent.delete(0, tk.END); playlist_ent.config(state="readonly")
                     return
             load_pl(val, sec_cb.get())
 
+        playlist_ent.bind("<Button-1>", open_playlist_selector)
         sec_cb.bind("<<ComboboxSelected>>", lambda e: [acc_cb.set(''), update_acc_list()])
         acc_cb.bind("<<ComboboxSelected>>", on_acc_select)
         acc_cb.bind("<Button-1>", update_acc_list)
 
-        # Logic khởi tạo dữ liệu cũ (Chỉ chạy nếu Secret hợp lệ)
         if sec_cb.get():
             update_acc_list()
-            saved_acc = data.get('acc')
-            # Kiểm tra saved_acc có tồn tại và nằm trong danh sách khả dụng
-            if saved_acc and saved_acc in acc_cb['values']:
-                acc_cb.set(saved_acc)
-                load_pl(saved_acc, sec_cb.get())
-        # -------------------------------
+            if data.get('acc') and data.get('acc') in acc_cb['values']:
+                acc_cb.set(data.get('acc')); load_pl(data.get('acc'), sec_cb.get())
 
-        def quick_add():
+        # --- OTHER WIDGETS ---
+        def qa():
             s = sec_cb.get()
-            if not s: self.popup_error("Err", "Select Secret First"); return
+            if not s: self.popup_error("Err", "Select Secret"); return
             def t():
-                new, err = youtube_api.create_new_login(s)
-                if new: 
-                    self.after(0, lambda: [self.refresh_global_ui(), self.popup_info("OK", f"Added: {new}"), acc_cb.set(new), load_pl(new, s)])
-                else: 
-                    self.after(0, lambda: self.popup_error("Err", err))
+                n, e = youtube_api.create_new_login(s)
+                if n: self.after(0, lambda: [self.refresh_global_ui(), self.popup_info("OK", f"Added {n}"), acc_cb.set(n), load_pl(n, s)])
             threading.Thread(target=t, daemon=True).start()
-        ttk.Button(fr, text="+", width=3, bootstyle="primary-outline", command=quick_add).pack(side=LEFT, padx=(0,5))
+        ttk.Button(fr, text="+", width=3, bootstyle="primary-outline", command=qa).pack(side=LEFT, padx=(0,5))
 
-        tm = ttk.Entry(fr, width=33, justify="center"); tm.pack(side=LEFT, padx=2)
-        tm.insert(0, data.get('time', "08:00, 19:00"))
-        
-        gap = ttk.Spinbox(fr, from_=0, to=30, width=5, justify="center"); gap.pack(side=LEFT, padx=2)
-        gap.set(data.get('gap', 0))
-        
+        tm = ttk.Entry(fr, width=33, justify="center"); tm.pack(side=LEFT, padx=2); tm.insert(0, data.get('time', "08:00, 19:00"))
+        gap = ttk.Spinbox(fr, from_=0, to=30, width=5, justify="center"); gap.pack(side=LEFT, padx=2); gap.set(data.get('gap', 0))
         cat = ttk.Combobox(fr, state="readonly", values=list(config.YT_CATEGORIES.keys()), width=25); cat.pack(side=LEFT, padx=2)
         cat.set(data.get('cat', "Default (From Settings)"))
-        
         stat = ttk.Label(fr, text="Ready", foreground="gray", width=22, anchor="center"); stat.pack(side=LEFT, padx=5)
-        
         pe = threading.Event(); pe.set()
         
-        # --- LOGIC PAUSE (Đã sửa ở bước trước) ---
         def toggle_pause():
-            if pe.is_set():
-                pe.clear()
-                bp.config(text="▶", bootstyle="warning") 
-                stat.config(text="Pausing...", foreground="#ffc107")
-                self.log(f"Row {lbl_idx.cget('text')}: Pause requested.", tag="INFO")
-            else:
-                pe.set()
-                bp.config(text="⏸", bootstyle="primary")
-                stat.config(text="Resuming...", foreground="#007bff")
-                self.log(f"Row {lbl_idx.cget('text')}: Resumed.", tag="INFO")
-        
-        bp = ttk.Button(fr, text="⏸", width=4, bootstyle="primary", state="disabled", command=toggle_pause)
-        bp.pack(side=LEFT, padx=2)
-        
+            if pe.is_set(): pe.clear(); bp.config(text="▶", bootstyle="warning"); stat.config(text="Pausing...", foreground="#ffc107")
+            else: pe.set(); bp.config(text="⏸", bootstyle="primary"); stat.config(text="Resuming...", foreground="#007bff")
+        bp = ttk.Button(fr, text="⏸", width=4, bootstyle="primary", state="disabled", command=toggle_pause); bp.pack(side=LEFT, padx=2)
+
         def dele(): 
-            fr.destroy(); self.row_frames.remove(row_widgets)
+            fr.destroy(); self.row_frames.remove(row_widgets); self.update_master_state()
             for i,r in enumerate(self.row_frames): r['lbl_idx'].config(text=str(i+1))
-            self.update_master_state()
         ttk.Button(fr, text="X", width=4, bootstyle="primary-outline", command=dele).pack(side=LEFT, padx=5)
 
-        row_widgets = {'frame': fr, 'lbl_idx': lbl_idx, 'chk': chk_var, 'secret': sec_cb, 'folder': fol_ent, 'acc': acc_cb, 'playlist': playlist_cb, 'playlist_map': playlist_map, 'time': tm, 'gap': gap, 'cat': cat, 'stat': stat, 'pause_event': pe, 'btn_pause': bp, 'running': False}
+        # --- QUAN TRỌNG: LƯU BIẾN VÀO DICT ĐỂ DÙNG SAU ---
+        row_widgets = {
+            'frame': fr, 'lbl_idx': lbl_idx, 'chk': chk_var, 
+            'secret': sec_cb, 'folder': fol_ent, 'acc': acc_cb, 
+            'playlist': playlist_ent,   # Lưu widget Entry
+            'playlist_data': row_data,  # Lưu dữ liệu danh sách ID
+            'time': tm, 'gap': gap, 'cat': cat, 'stat': stat, 
+            'pause_event': pe, 'btn_pause': bp, 'running': False
+        }
         self.row_frames.append(row_widgets)
-
     def browse_folder(self, entry, idx):
         d = filedialog.askdirectory()
         if d:
@@ -509,12 +606,19 @@ class AutoYoutubeApp(ttk.Window):
     def save_state(self):
         state = {}
         for i, r in enumerate(self.row_frames):
-            pl_name = r['playlist'].get()
-            pl_id = r['playlist_map'].get(pl_name, "")
+            # --- SỬA ĐỔI: Lấy danh sách ID từ biến playlist_data ---
+            # r['playlist_data'] là cái dict row_data ta tạo trong add_row
+            pl_ids = list(r['playlist_data']['selected_playlists'].keys())
+            
             state[str(i+1)] = {
-                "secret": r['secret'].get(), "folder": r['folder'].get(), "acc": r['acc'].get(),
-                "time": r['time'].get(), "cat": r['cat'].get(), "gap": r['gap'].get(), "chk": r['chk'].get(),
-                "playlist_name": pl_name, "playlist_id": pl_id
+                "secret": r['secret'].get(), 
+                "folder": r['folder'].get(), 
+                "acc": r['acc'].get(),
+                "time": r['time'].get(), 
+                "cat": r['cat'].get(), 
+                "gap": r['gap'].get(), 
+                "chk": r['chk'].get(),
+                "playlist_ids": pl_ids # <-- Lưu mảng ID (VD: ['id1', 'id2'])
             }
         config.save_json(config.GRID_STATE_FILE, state)
 
@@ -893,20 +997,46 @@ class AutoYoutubeApp(ttk.Window):
     # =========================================================================
     def on_start(self):
         if not self.check_access(): return
-        self.save_state(); a = 0; self.log("--- START PROCESS ---", tag="INFO")
+        self.save_state()
+        
+        # 1. Lấy danh sách các tài khoản đang chạy để tránh trùng
+        active_accounts = set()
         for r in self.row_frames:
+            if r['running'] and r['acc'].get():
+                active_accounts.add(r['acc'].get())
+
+        a = 0
+        self.log("--- START PROCESS ---", tag="INFO")
+        
+        for i, r in enumerate(self.row_frames):
             if not r['chk'].get() or r['running']: continue
-            s,f,ac,t = r['secret'].get(), r['folder'].get(), r['acc'].get(), r['time'].get()
-            if not all([s,f,ac,t]): continue
             
+            s, f, ac, t = r['secret'].get(), r['folder'].get(), r['acc'].get(), r['time'].get()
+            
+            # Kiểm tra thiếu thông tin
+            if not all([s, f, ac, t]): 
+                self.log(f"Row {i+1}: Missing info.", tag="ERROR")
+                continue
+            
+            # Kiểm tra trùng tài khoản đang chạy
+            if ac in active_accounts:
+                self.log(f"Row {i+1} Skipped: Account '{ac}' is already running.", tag="ERROR")
+                r['stat'].config(text="Acc Busy", foreground="red")
+                continue
+            
+            # Đánh dấu tài khoản này sẽ chạy
+            active_accounts.add(ac)
+
             r['running'] = True
             r['stat'].config(text="Starting...", foreground="#007bff")
             
-            pl_id = r['playlist_map'].get(r['playlist'].get(), "")
+            # --- SỬA ĐỔI: LẤY LIST PLAYLIST ID ---
+            pl_ids = list(r['playlist_data']['selected_playlists'].keys())
             
             cfg = {
                 'secret': s, 'folder': f, 'acc': ac, 'time': t, 
-                'cat_name': r['cat'].get(), 'gap': int(r['gap'].get()or 0), 'playlist_id': pl_id
+                'cat_name': r['cat'].get(), 'gap': int(r['gap'].get() or 0), 
+                'playlist_ids': pl_ids # <-- Gửi list ID sang utils.py
             }
             
             th = threading.Thread(target=utils.run_job_thread, args=(r, cfg, self.log, r['pause_event']))
