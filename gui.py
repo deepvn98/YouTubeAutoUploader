@@ -70,24 +70,32 @@ class AutoYoutubeApp(ttk.Window):
             except: pass
 
         all_secrets_list = sorted(list(real_secrets))
+        
+        # Danh sách mới để lưu những dòng còn tồn tại
+        surviving_rows = []
+        rows_changed = False
 
-        # 3. CẬP NHẬT TỪNG DÒNG (GRID)
+        # 3. DUYỆT QUA CÁC DÒNG HIỆN TẠI
         for r in self.row_frames:
-            # --- CẤP 1: SECRET (CHA) ---
             cur_sec = r['secret'].get()
             
-            # Nếu file Secret đã bị xóa khỏi ổ cứng -> Reset ô Secret
+            # --- KIỂM TRA QUAN TRỌNG: SECRET CÒN TỒN TẠI KHÔNG? ---
+            # Nếu dòng này đã chọn Secret, nhưng file Secret đó không còn trên ổ cứng
             if cur_sec and cur_sec not in real_secrets:
-                r['secret'].set('')
-                cur_sec = "" 
+                # -> HỦY DÒNG NÀY NGAY LẬP TỨC
+                r['frame'].destroy() 
+                rows_changed = True
+                continue # Bỏ qua, không thêm vào surviving_rows
+
+            # --- NẾU SECRET CÒN (HOẶC CHƯA CHỌN), TIẾP TỤC CẬP NHẬT UI ---
             
-            # Cập nhật lại danh sách Secret trong Combobox
+            # Cập nhật danh sách Secret trong Combobox
             r['secret']['values'] = all_secrets_list
 
-            # --- CẤP 2: ACCOUNT (CON) ---
+            # --- CẤP 2: ACCOUNT (Logic Cascade Delete cũ) ---
             cur_acc = r['acc'].get()
             
-            # Tính toán danh sách Account hợp lệ dựa trên Secret hiện tại
+            # Tính toán danh sách Account hợp lệ cho Secret này
             valid_accs = []
             if cur_sec:
                 try:
@@ -95,12 +103,10 @@ class AutoYoutubeApp(ttk.Window):
                     valid_accs = token_map.get(cid, [])
                 except: valid_accs = []
             
-            # Cập nhật danh sách Account trong Combobox
+            # Cập nhật danh sách Account
             r['acc']['values'] = valid_accs
 
-            # Logic xóa Account:
-            # 1. Nếu Account đang chọn không còn tồn tại trên ổ cứng (real_tokens)
-            # 2. HOẶC Nếu Account đang chọn không còn khớp với Secret (do Secret đã bị đổi hoặc bị xóa)
+            # Kiểm tra xem Account có cần bị xóa không (file mất hoặc không khớp secret)
             should_clear_acc = False
             if cur_acc:
                 if cur_acc not in real_tokens: should_clear_acc = True
@@ -109,18 +115,27 @@ class AutoYoutubeApp(ttk.Window):
             if should_clear_acc:
                  r['acc'].set('')
                  
-                 # --- CẤP 3: PLAYLIST (CHÁU) ---
-                 # FIX LỖI CRASH: Dùng logic của Entry widget thay vì .set()
+                 # Xóa sạch dữ liệu Playlist (UI + Data)
                  try:
                      p_ent = r['playlist']
-                     p_ent.config(state="normal") # Mở khóa để xóa
-                     p_ent.delete(0, tk.END)      # Xóa sạch text
-                     p_ent.config(state="readonly") # Khóa lại
-                 except Exception as e:
-                     print(f"Error clearing playlist UI: {e}")
+                     p_ent.config(state="normal")
+                     p_ent.delete(0, tk.END)
+                     p_ent.config(state="readonly")
+                 except: pass
+                 r['playlist_data']['playlist_map'] = {}
+                 r['playlist_data']['selected_playlists'] = {}
 
-                 # Xóa dữ liệu ngầm của playlist
-                 r['playlist_data'] = {'playlist_map': {}, 'selected_playlists': {}}
+            # Giữ lại dòng này
+            surviving_rows.append(r)
+
+        # 4. CẬP NHẬT LẠI DANH SÁCH QUẢN LÝ
+        self.row_frames = surviving_rows
+
+        # 5. NẾU CÓ DÒNG BỊ XÓA -> ĐÁNH SỐ LẠI STT (1, 2, 3...)
+        if rows_changed:
+            for i, r in enumerate(self.row_frames):
+                r['lbl_idx'].config(text=str(i + 1))
+            self.update_master_state() # Cập nhật checkbox Master
 
         self.update_idletasks()
 
@@ -353,50 +368,99 @@ class AutoYoutubeApp(ttk.Window):
         # --- HÀM CẬP NHẬT LIST ACCOUNT (NEW CHANGE: HIỆN TOÀN BỘ ĐỂ CHECK TRÙNG) ---
         def update_acc_list(e=None):
             sec = sec_cb.get()
-            if not sec: acc_cb['values'] = []; return
+            if not sec: 
+                acc_cb['values'] = []
+                return
+
+            # 1. Lấy Client ID từ file Secret hiện tại
             cid = youtube_api.get_client_id_from_file(sec)
-            valid = []
+            
+            # 2. Tìm tất cả file token trên ổ cứng khớp với Secret này
+            all_valid_tokens = []
             if cid:
                 for f in glob.glob(os.path.join(config.TOKEN_DIR, "*.json")):
                     try:
-                        if json.load(open(f)).get("client_id") == cid: valid.append(os.path.basename(f))
+                        # Dùng open thông thường để đọc nhanh
+                        if json.load(open(f)).get("client_id") == cid: 
+                            all_valid_tokens.append(os.path.basename(f))
                     except: pass
-            # NEW CHANGE: Không lọc bỏ 'used' ở đây nữa, mà hiển thị hết
-            # Để người dùng chọn -> và nhận thông báo lỗi cụ thể ở hàm on_acc_select
-            acc_cb['values'] = valid 
+            
+            # 3. Tìm các Account đang bị chiếm dụng bởi các dòng KHÁC
+            used_accounts = set()
+            for r in self.row_frames:
+                # Quan trọng: Không tính dòng hiện tại (r['acc'] != acc_cb)
+                # Để nếu dòng này đang chọn Account A, thì Account A vẫn hiện trong list
+                if r['acc'] != acc_cb:
+                    val = r['acc'].get()
+                    if val:
+                        used_accounts.add(val)
+
+            # 4. Lọc danh sách: Chỉ lấy cái nào KHÔNG nằm trong used_accounts
+            final_list = [acc for acc in all_valid_tokens if acc not in used_accounts]
+            
+            acc_cb['values'] = final_list
 
         # --- COPY LẠI HÀM open_playlist_selector TỪ CODE CŨ (GIỮ NGUYÊN) ---
         # (Để ngắn gọn tôi không paste lại đoạn Playlist Selector dài dòng ở đây, 
         # bạn hãy giữ nguyên logic Playlist Selector như code trước của bạn)
         def open_playlist_selector(e=None):
-            # ... (Giữ nguyên logic Playlist Selector của bạn) ...
-            if not row_data['playlist_map']:
-                status = playlist_ent.get()
-                if status in ["Loading...", "Login Error", "API Error"]: return
-                if not acc_cb.get(): 
-                    self.popup_error("Error", "Select Account first.")
-                    return
-                self.popup_error("Info", "No playlists found.")
+            # --- BƯỚC 1: KIỂM TRA ĐIỀU KIỆN ---
+            current_acc = acc_cb.get()
+            
+            # Nếu chưa chọn Account: Chặn luôn + Xóa rác
+            if not current_acc: 
+                self.popup_error("Error", "Please select an Account first.")
+                row_data['playlist_map'] = {}
+                row_data['selected_playlists'] = {}
+                playlist_ent.config(state="normal"); playlist_ent.delete(0, tk.END); playlist_ent.config(state="readonly")
                 return
 
+            # Nếu có Account nhưng chưa có dữ liệu Playlist (Loading hoặc Lỗi)
+            if not row_data['playlist_map']:
+                status_text = playlist_ent.get()
+                
+                # Nếu đang loading hoặc lỗi API -> Không mở cửa sổ
+                if status_text in ["Loading...", "Login Error", "API Error"]: 
+                    return
+                
+                # Nếu trống trơn (do lỗi mạng trước đó), thử tải lại
+                self.popup_info("Info", "No playlists found or list is empty. Trying to reload...")
+                load_pl(current_acc, sec_cb.get())
+                return
+
+            # --- BƯỚC 2: KHỞI TẠO CỬA SỔ (TÀNG HÌNH) ---
             p = ttk.Toplevel(self)
-            p.attributes('-alpha', 0.0)
+            p.attributes('-alpha', 0.0) # Ẩn để vẽ layout trước
             p.title("Playlist Selector")
             
-            head_fr = ttk.Frame(p, padding=10); head_fr.pack(fill=X)
+            # --- Header: Tìm kiếm ---
+            head_fr = ttk.Frame(p, padding=10)
+            head_fr.pack(fill=X)
+            
             search_var = tk.StringVar()
             entry_search = ttk.Entry(head_fr, textvariable=search_var, font=("Segoe UI", 10))
-            entry_search.pack(side=LEFT, fill=X, expand=True, padx=(0, 5)); entry_search.insert(0, "Search...")
+            entry_search.pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
+            entry_search.insert(0, "Search...")
+            
             def on_focus_in(e):
                 if entry_search.get() == "Search...": entry_search.delete(0, tk.END)
             entry_search.bind("<FocusIn>", on_focus_in)
 
-            body_fr = ScrolledFrame(p, autohide=True); body_fr.pack(fill=BOTH, expand=True, padx=10)
-            foot_fr = ttk.Frame(p, padding=10, bootstyle="light"); foot_fr.pack(fill=X, side=BOTTOM)
-            lbl_count = ttk.Label(foot_fr, text="Selected: 0", font=("Bold", 10), bootstyle="inverse-light"); lbl_count.pack(side=LEFT)
+            # --- Body: Danh sách cuộn ---
+            body_fr = ScrolledFrame(p, autohide=True)
+            body_fr.pack(fill=BOTH, expand=True, padx=10)
+            
+            # --- Footer: Nút bấm ---
+            foot_fr = ttk.Frame(p, padding=10, bootstyle="light")
+            foot_fr.pack(fill=X, side=BOTTOM)
+            
+            lbl_count = ttk.Label(foot_fr, text="Selected: 0", font=("Bold", 10), bootstyle="inverse-light")
+            lbl_count.pack(side=LEFT)
 
+            # --- Logic Render List ---
             vars_map = {} 
-            for name, pid in row_data['playlist_map'].items():
+            # Khởi tạo trạng thái checkbox dựa trên dữ liệu đã lưu
+            for pid in row_data['playlist_map'].values():
                 is_selected = pid in row_data['selected_playlists']
                 vars_map[pid] = tk.BooleanVar(value=is_selected)
 
@@ -407,27 +471,42 @@ class AutoYoutubeApp(ttk.Window):
             def render_list(filter_text=""):
                 for widget in body_fr.winfo_children(): widget.destroy()
                 filter_text = filter_text.lower() if filter_text != "search..." else ""
+                
                 items_to_draw = []
                 for name, pid in row_data['playlist_map'].items():
                     if filter_text and filter_text not in name.lower(): continue
                     items_to_draw.append((name, pid))
+                
+                if not items_to_draw:
+                    ttk.Label(body_fr, text="No matches found").pack(pady=10)
+
                 for name, pid in items_to_draw:
-                    row = ttk.Frame(body_fr, padding=(5, 5)); row.pack(fill=X, pady=1)
+                    row = ttk.Frame(body_fr, padding=(5, 5))
+                    row.pack(fill=X, pady=1)
+                    
                     var = vars_map[pid]
                     chk = ttk.Checkbutton(row, text=name, variable=var, command=update_count)
                     chk.pack(side=LEFT, fill=X, expand=True)
+                    
+                    # Hiệu ứng hover
                     row.bind("<Enter>", lambda e, r=row: r.configure(bootstyle="info"))
                     row.bind("<Leave>", lambda e, r=row: r.configure(bootstyle="default"))
+                    
+                    # Click vào dòng cũng tích vào checkbox
                     def toggle(e, v=var): v.set(not v.get()); update_count()
                     row.bind("<Button-1>", toggle)
 
+            # Trigger vẽ lần đầu
             search_var.trace("w", lambda *args: render_list(search_var.get()))
+
+            # --- Các nút chức năng ---
             def select_all():
                 for v in vars_map.values(): v.set(True)
                 update_count()
             def clear_all():
                 for v in vars_map.values(): v.set(False)
                 update_count()
+
             btn_all = ttk.Button(head_fr, text="All", width=4, bootstyle="secondary-outline", command=select_all)
             btn_all.pack(side=RIGHT)
             ttk.Button(head_fr, text="None", width=5, bootstyle="secondary-outline", command=clear_all).pack(side=RIGHT, padx=2)
@@ -435,8 +514,8 @@ class AutoYoutubeApp(ttk.Window):
             def save_selection():
                 new_selected = {}
                 display_names = []
-                id_to_name = {name: pid for name, pid in row_data['playlist_map'].items()} # Fix ngược logic chút: name là key hiển thị
-                # Map lại cho chuẩn:
+                
+                # Tạo map ngược ID -> Name để lấy tên hiển thị
                 pid_to_name = {pid: name for name, pid in row_data['playlist_map'].items()}
                 
                 for pid, var in vars_map.items():
@@ -444,19 +523,46 @@ class AutoYoutubeApp(ttk.Window):
                         name = pid_to_name.get(pid, "Unknown")
                         new_selected[pid] = name
                         display_names.append(name)
+                
+                # Cập nhật dữ liệu vào memory của dòng này
                 row_data['selected_playlists'] = new_selected
-                playlist_ent.config(state="normal"); playlist_ent.delete(0, tk.END)
-                if not display_names: playlist_ent.insert(0, "No Playlist")
-                elif len(display_names) == 1: playlist_ent.insert(0, display_names[0])
-                else: playlist_ent.insert(0, f"{len(display_names)} Playlists selected")
+                
+                # Cập nhật hiển thị ra Entry bên ngoài
+                playlist_ent.config(state="normal")
+                playlist_ent.delete(0, tk.END)
+                
+                if not display_names: 
+                    playlist_ent.insert(0, "No Playlist")
+                elif len(display_names) == 1: 
+                    playlist_ent.insert(0, display_names[0])
+                else: 
+                    playlist_ent.insert(0, f"{len(display_names)} Playlists selected")
+                
                 playlist_ent.config(state="readonly")
                 p.destroy()
 
             ttk.Button(foot_fr, text="SAVE SELECTION", bootstyle="success", command=save_selection).pack(side=RIGHT)
-            render_list(); update_count(); p.update_idletasks()
-            width = 450; height = 550; x = (self.winfo_screenwidth()//2)-(width//2); y = (self.winfo_screenheight()//2)-(height//2)
-            p.geometry(f"{width}x{height}+{x}+{y}"); p.attributes('-alpha', 1.0)
-            p.transient(self); p.grab_set(); p.focus_set(); self.wait_window(p)
+
+            render_list()
+            update_count()
+            
+            # --- BƯỚC 3: HIỂN THỊ (SHOW) ---
+            p.update_idletasks() # Tính toán layout
+            
+            width = 450
+            height = 550
+            screen_width = self.winfo_screenwidth()
+            screen_height = self.winfo_screenheight()
+            x = (screen_width // 2) - (width // 2)
+            y = (screen_height // 2) - (height // 2)
+            
+            p.geometry(f"{width}x{height}+{x}+{y}")
+            p.attributes('-alpha', 1.0) # Hiện hình
+            
+            p.transient(self)
+            p.grab_set()
+            p.focus_set()
+            self.wait_window(p)
 
         def load_pl(acc, sec):
             if not acc or not sec: return
@@ -487,24 +593,44 @@ class AutoYoutubeApp(ttk.Window):
         # --- NEW CHANGE: HÀM KIỂM TRA TRÙNG LẶP KHI CHỌN ---
         def on_acc_select(e):
             val = acc_cb.get()
-            if not val: return
             
-            # Kiểm tra xem tài khoản này đã được dùng ở dòng nào chưa
+            # --- TRƯỜNG HỢP 1: Tài khoản bị xóa về rỗng ---
+            # (Người dùng xóa text hoặc chọn dòng trống)
+            if not val:
+                # 1. Xóa dữ liệu trong bộ nhớ (Quan trọng)
+                row_data['playlist_map'] = {}
+                row_data['selected_playlists'] = {}
+                
+                # 2. Xóa hiển thị trên giao diện
+                playlist_ent.config(state="normal")
+                playlist_ent.delete(0, tk.END)
+                playlist_ent.config(state="readonly")
+                return
+
+            # --- TRƯỜNG HỢP 2: Kiểm tra trùng lặp trên Grid ---
             for r in self.row_frames:
                 # Bỏ qua chính dòng hiện tại
                 if r['acc'] == acc_cb: continue
                 
-                # Nếu tìm thấy trùng
+                # Nếu tìm thấy dòng khác đang dùng tài khoản này
                 if r['acc'].get() == val:
-                    used_at_row = r['lbl_idx'].cget('text') # Lấy số dòng
+                    used_at_row = r['lbl_idx'].cget('text')
                     self.popup_error("Duplicate Account", f"Account '{val}' is already active at Row {used_at_row}.")
                     
-                    # Reset lại ô này về rỗng
+                    # Reset ô Account về rỗng
                     acc_cb.set('')
-                    playlist_ent.config(state="normal"); playlist_ent.delete(0, tk.END); playlist_ent.config(state="readonly")
-                    return # Dừng, không load playlist
+                    
+                    # Xóa sạch dữ liệu Playlist (để không lưu rác của acc trùng)
+                    row_data['playlist_map'] = {}
+                    row_data['selected_playlists'] = {}
+                    
+                    # Reset ô Playlist về rỗng
+                    playlist_ent.config(state="normal")
+                    playlist_ent.delete(0, tk.END)
+                    playlist_ent.config(state="readonly")
+                    return 
 
-            # Nếu không trùng thì load playlist bình thường
+            # --- TRƯỜNG HỢP 3: Hợp lệ -> Tải Playlist từ API ---
             load_pl(val, sec_cb.get())
 
         playlist_ent.bind("<Button-1>", open_playlist_selector)
