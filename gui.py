@@ -53,36 +53,76 @@ class AutoYoutubeApp(ttk.Window):
     # CORE LOGIC: ĐỒNG BỘ DỮ LIỆU TOÀN CỤC
     # =========================================================================
     def refresh_global_ui(self):
-        all_secrets = [os.path.basename(f) for f in glob.glob(os.path.join(config.SECRET_DIR, "*.json"))]
+        # 1. QUÉT DỮ LIỆU THỰC TẾ TRÊN Ổ CỨNG
+        real_secrets = set(os.path.basename(f) for f in glob.glob(os.path.join(config.SECRET_DIR, "*.json")))
+        real_tokens = set(os.path.basename(f) for f in glob.glob(os.path.join(config.TOKEN_DIR, "*.json")))
 
+        # 2. Tạo bản đồ Mapping (Client ID -> Danh sách Token Files)
+        token_map = {}
+        for t_file in real_tokens:
+            full_path = os.path.join(config.TOKEN_DIR, t_file)
+            try:
+                with open(full_path, 'r') as jf:
+                    cid = json.load(jf).get("client_id")
+                    if cid:
+                        if cid not in token_map: token_map[cid] = []
+                        token_map[cid].append(t_file)
+            except: pass
+
+        all_secrets_list = sorted(list(real_secrets))
+
+        # 3. CẬP NHẬT TỪNG DÒNG (GRID)
         for r in self.row_frames:
-            current_sec = r['secret'].get()
-            r['secret']['values'] = all_secrets
+            # --- CẤP 1: SECRET (CHA) ---
+            cur_sec = r['secret'].get()
             
-            if current_sec and current_sec not in all_secrets:
+            # Nếu file Secret đã bị xóa khỏi ổ cứng -> Reset ô Secret
+            if cur_sec and cur_sec not in real_secrets:
                 r['secret'].set('')
-                r['acc'].set(''); r['acc']['values'] = []
-                r['playlist'].set(''); r['playlist']['values'] = []
-                continue 
+                cur_sec = "" 
+            
+            # Cập nhật lại danh sách Secret trong Combobox
+            r['secret']['values'] = all_secrets_list
 
-            if current_sec:
-                cid = youtube_api.get_client_id_from_file(current_sec)
-                valid_accs = []
-                if cid:
-                    for f in glob.glob(os.path.join(config.TOKEN_DIR, "*.json")):
-                        try:
-                            if json.load(open(f)).get("client_id") == cid: valid_accs.append(os.path.basename(f))
-                        except: pass
-                
-                r['acc']['values'] = valid_accs
-                
-                current_acc = r['acc'].get()
-                if current_acc and current_acc not in valid_accs:
-                    r['acc'].set('')
-                    r['playlist'].set(''); r['playlist']['values'] = []
-            else:
-                r['acc']['values'] = []
-                r['acc'].set('')
+            # --- CẤP 2: ACCOUNT (CON) ---
+            cur_acc = r['acc'].get()
+            
+            # Tính toán danh sách Account hợp lệ dựa trên Secret hiện tại
+            valid_accs = []
+            if cur_sec:
+                try:
+                    cid = youtube_api.get_client_id_from_file(cur_sec)
+                    valid_accs = token_map.get(cid, [])
+                except: valid_accs = []
+            
+            # Cập nhật danh sách Account trong Combobox
+            r['acc']['values'] = valid_accs
+
+            # Logic xóa Account:
+            # 1. Nếu Account đang chọn không còn tồn tại trên ổ cứng (real_tokens)
+            # 2. HOẶC Nếu Account đang chọn không còn khớp với Secret (do Secret đã bị đổi hoặc bị xóa)
+            should_clear_acc = False
+            if cur_acc:
+                if cur_acc not in real_tokens: should_clear_acc = True
+                elif cur_acc not in valid_accs: should_clear_acc = True
+            
+            if should_clear_acc:
+                 r['acc'].set('')
+                 
+                 # --- CẤP 3: PLAYLIST (CHÁU) ---
+                 # FIX LỖI CRASH: Dùng logic của Entry widget thay vì .set()
+                 try:
+                     p_ent = r['playlist']
+                     p_ent.config(state="normal") # Mở khóa để xóa
+                     p_ent.delete(0, tk.END)      # Xóa sạch text
+                     p_ent.config(state="readonly") # Khóa lại
+                 except Exception as e:
+                     print(f"Error clearing playlist UI: {e}")
+
+                 # Xóa dữ liệu ngầm của playlist
+                 r['playlist_data'] = {'playlist_map': {}, 'selected_playlists': {}}
+
+        self.update_idletasks()
 
     # =========================================================================
     # GUI COMPONENTS
@@ -308,9 +348,9 @@ class AutoYoutubeApp(ttk.Window):
         acc_cb = ttk.Combobox(fr, state="readonly", width=28); acc_cb.pack(side=LEFT, padx=2)
         playlist_ent = ttk.Entry(fr, state="readonly", width=25); playlist_ent.pack(side=LEFT, padx=2)
         
-        # Biến quan trọng: Lưu danh sách playlist
         row_data = {'playlist_map': {}, 'selected_playlists': {}}
 
+        # --- HÀM CẬP NHẬT LIST ACCOUNT (NEW CHANGE: HIỆN TOÀN BỘ ĐỂ CHECK TRÙNG) ---
         def update_acc_list(e=None):
             sec = sec_cb.get()
             if not sec: acc_cb['values'] = []; return
@@ -321,13 +361,15 @@ class AutoYoutubeApp(ttk.Window):
                     try:
                         if json.load(open(f)).get("client_id") == cid: valid.append(os.path.basename(f))
                     except: pass
-            used = {r['acc'].get() for r in self.row_frames if r['acc'] != acc_cb and r['acc'].get()}
-            acc_cb['values'] = [a for a in valid if a not in used]
+            # NEW CHANGE: Không lọc bỏ 'used' ở đây nữa, mà hiển thị hết
+            # Để người dùng chọn -> và nhận thông báo lỗi cụ thể ở hàm on_acc_select
+            acc_cb['values'] = valid 
 
-        # --- HÀM BẬT CỬA SỔ CHỌN PLAYLIST (PHIÊN BẢN PRO) ---
-        # --- HÀM BẬT CỬA SỔ CHỌN PLAYLIST (FIX TRIỆT ĐỂ BẰNG ALPHA CHANNEL) ---
+        # --- COPY LẠI HÀM open_playlist_selector TỪ CODE CŨ (GIỮ NGUYÊN) ---
+        # (Để ngắn gọn tôi không paste lại đoạn Playlist Selector dài dòng ở đây, 
+        # bạn hãy giữ nguyên logic Playlist Selector như code trước của bạn)
         def open_playlist_selector(e=None):
-            # 1. Kiểm tra điều kiện (Logic cũ)
+            # ... (Giữ nguyên logic Playlist Selector của bạn) ...
             if not row_data['playlist_map']:
                 status = playlist_ent.get()
                 if status in ["Loading...", "Login Error", "API Error"]: return
@@ -337,39 +379,22 @@ class AutoYoutubeApp(ttk.Window):
                 self.popup_error("Info", "No playlists found.")
                 return
 
-            # 2. Tạo cửa sổ và TÀNG HÌNH NGAY LẬP TỨC
             p = ttk.Toplevel(self)
-            p.attributes('-alpha', 0.0) # Độ trong suốt = 0 (Tàng hình)
-            # Lưu ý: Không dùng withdraw() nữa để tránh xung đột animation
-            
+            p.attributes('-alpha', 0.0)
             p.title("Playlist Selector")
             
-            # 3. Xây dựng giao diện
-            # --- HEADER ---
-            head_fr = ttk.Frame(p, padding=10)
-            head_fr.pack(fill=X)
-            
+            head_fr = ttk.Frame(p, padding=10); head_fr.pack(fill=X)
             search_var = tk.StringVar()
             entry_search = ttk.Entry(head_fr, textvariable=search_var, font=("Segoe UI", 10))
-            entry_search.pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
-            entry_search.insert(0, "Search...")
-            
+            entry_search.pack(side=LEFT, fill=X, expand=True, padx=(0, 5)); entry_search.insert(0, "Search...")
             def on_focus_in(e):
                 if entry_search.get() == "Search...": entry_search.delete(0, tk.END)
             entry_search.bind("<FocusIn>", on_focus_in)
 
-            # --- BODY ---
-            body_fr = ScrolledFrame(p, autohide=True)
-            body_fr.pack(fill=BOTH, expand=True, padx=10)
-            
-            # --- FOOTER ---
-            foot_fr = ttk.Frame(p, padding=10, bootstyle="light")
-            foot_fr.pack(fill=X, side=BOTTOM)
-            
-            lbl_count = ttk.Label(foot_fr, text="Selected: 0", font=("Bold", 10), bootstyle="inverse-light")
-            lbl_count.pack(side=LEFT)
+            body_fr = ScrolledFrame(p, autohide=True); body_fr.pack(fill=BOTH, expand=True, padx=10)
+            foot_fr = ttk.Frame(p, padding=10, bootstyle="light"); foot_fr.pack(fill=X, side=BOTTOM)
+            lbl_count = ttk.Label(foot_fr, text="Selected: 0", font=("Bold", 10), bootstyle="inverse-light"); lbl_count.pack(side=LEFT)
 
-            # --- LOGIC DỮ LIỆU & VẼ LIST ---
             vars_map = {} 
             for name, pid in row_data['playlist_map'].items():
                 is_selected = pid in row_data['selected_playlists']
@@ -382,36 +407,27 @@ class AutoYoutubeApp(ttk.Window):
             def render_list(filter_text=""):
                 for widget in body_fr.winfo_children(): widget.destroy()
                 filter_text = filter_text.lower() if filter_text != "search..." else ""
-                
                 items_to_draw = []
                 for name, pid in row_data['playlist_map'].items():
                     if filter_text and filter_text not in name.lower(): continue
                     items_to_draw.append((name, pid))
-                
                 for name, pid in items_to_draw:
-                    row = ttk.Frame(body_fr, padding=(5, 5))
-                    row.pack(fill=X, pady=1)
-                    
+                    row = ttk.Frame(body_fr, padding=(5, 5)); row.pack(fill=X, pady=1)
                     var = vars_map[pid]
                     chk = ttk.Checkbutton(row, text=name, variable=var, command=update_count)
                     chk.pack(side=LEFT, fill=X, expand=True)
-                    
                     row.bind("<Enter>", lambda e, r=row: r.configure(bootstyle="info"))
                     row.bind("<Leave>", lambda e, r=row: r.configure(bootstyle="default"))
-                    
                     def toggle(e, v=var): v.set(not v.get()); update_count()
                     row.bind("<Button-1>", toggle)
 
             search_var.trace("w", lambda *args: render_list(search_var.get()))
-
-            # --- NÚT BẤM ---
             def select_all():
                 for v in vars_map.values(): v.set(True)
                 update_count()
             def clear_all():
                 for v in vars_map.values(): v.set(False)
                 update_count()
-
             btn_all = ttk.Button(head_fr, text="All", width=4, bootstyle="secondary-outline", command=select_all)
             btn_all.pack(side=RIGHT)
             ttk.Button(head_fr, text="None", width=5, bootstyle="secondary-outline", command=clear_all).pack(side=RIGHT, padx=2)
@@ -419,62 +435,28 @@ class AutoYoutubeApp(ttk.Window):
             def save_selection():
                 new_selected = {}
                 display_names = []
+                id_to_name = {name: pid for name, pid in row_data['playlist_map'].items()} # Fix ngược logic chút: name là key hiển thị
+                # Map lại cho chuẩn:
+                pid_to_name = {pid: name for name, pid in row_data['playlist_map'].items()}
                 
-                # Tạo bản đồ ngược ID -> Name để tra cứu
-                id_to_name = {}
-                for name, pid in row_data['playlist_map'].items():
-                    id_to_name[pid] = name
-
                 for pid, var in vars_map.items():
                     if var.get():
-                        # Lấy tên từ map ngược, nếu không có thì để Unknown
-                        name = id_to_name.get(pid, "Unknown Playlist")
+                        name = pid_to_name.get(pid, "Unknown")
                         new_selected[pid] = name
                         display_names.append(name)
-                
-                # Cập nhật dữ liệu vào biến chính
                 row_data['selected_playlists'] = new_selected
-                
-                # Cập nhật text hiển thị ra ô Entry bên ngoài
                 playlist_ent.config(state="normal"); playlist_ent.delete(0, tk.END)
-                if not display_names: 
-                    playlist_ent.insert(0, "No Playlist")
-                elif len(display_names) == 1: 
-                    playlist_ent.insert(0, display_names[0])
-                else: 
-                    playlist_ent.insert(0, f"{len(display_names)} Playlists selected")
+                if not display_names: playlist_ent.insert(0, "No Playlist")
+                elif len(display_names) == 1: playlist_ent.insert(0, display_names[0])
+                else: playlist_ent.insert(0, f"{len(display_names)} Playlists selected")
                 playlist_ent.config(state="readonly")
-                
                 p.destroy()
 
             ttk.Button(foot_fr, text="SAVE SELECTION", bootstyle="success", command=save_selection).pack(side=RIGHT)
-
-            # Vẽ giao diện xong xuôi
-            render_list()
-            update_count()
-            
-            # 4. TÍNH TOÁN VỊ TRÍ & HIỆN HÌNH (Magic step)
-            # Ép hệ thống tính toán xong layout
-            p.update_idletasks() 
-            
-            width = 450
-            height = 550
-            screen_width = self.winfo_screenwidth()
-            screen_height = self.winfo_screenheight()
-            x = (screen_width // 2) - (width // 2)
-            y = (screen_height // 2) - (height // 2)
-            
-            # Đặt vị trí
-            p.geometry(f"{width}x{height}+{x}+{y}")
-            
-            # HIỆN NGUYÊN HÌNH (Chuyển alpha từ 0 -> 1)
-            p.attributes('-alpha', 1.0) 
-            
-            # 5. Cài đặt Modal
-            p.transient(self)
-            p.grab_set()
-            p.focus_set()
-            self.wait_window(p)
+            render_list(); update_count(); p.update_idletasks()
+            width = 450; height = 550; x = (self.winfo_screenwidth()//2)-(width//2); y = (self.winfo_screenheight()//2)-(height//2)
+            p.geometry(f"{width}x{height}+{x}+{y}"); p.attributes('-alpha', 1.0)
+            p.transient(self); p.grab_set(); p.focus_set(); self.wait_window(p)
 
         def load_pl(acc, sec):
             if not acc or not sec: return
@@ -502,14 +484,27 @@ class AutoYoutubeApp(ttk.Window):
                 playlist_ent.config(state="readonly")
             threading.Thread(target=t, daemon=True).start()
 
+        # --- NEW CHANGE: HÀM KIỂM TRA TRÙNG LẶP KHI CHỌN ---
         def on_acc_select(e):
             val = acc_cb.get()
             if not val: return
+            
+            # Kiểm tra xem tài khoản này đã được dùng ở dòng nào chưa
             for r in self.row_frames:
-                if r['acc'] != acc_cb and r['acc'].get() == val:
-                    self.popup_error("Duplicate", f"Account '{val}' used."); acc_cb.set(''); 
+                # Bỏ qua chính dòng hiện tại
+                if r['acc'] == acc_cb: continue
+                
+                # Nếu tìm thấy trùng
+                if r['acc'].get() == val:
+                    used_at_row = r['lbl_idx'].cget('text') # Lấy số dòng
+                    self.popup_error("Duplicate Account", f"Account '{val}' is already active at Row {used_at_row}.")
+                    
+                    # Reset lại ô này về rỗng
+                    acc_cb.set('')
                     playlist_ent.config(state="normal"); playlist_ent.delete(0, tk.END); playlist_ent.config(state="readonly")
-                    return
+                    return # Dừng, không load playlist
+
+            # Nếu không trùng thì load playlist bình thường
             load_pl(val, sec_cb.get())
 
         playlist_ent.bind("<Button-1>", open_playlist_selector)
@@ -519,19 +514,43 @@ class AutoYoutubeApp(ttk.Window):
 
         if sec_cb.get():
             update_acc_list()
+            # Logic load lại trạng thái cũ cũng cần kiểm tra trùng
             if data.get('acc') and data.get('acc') in acc_cb['values']:
                 acc_cb.set(data.get('acc')); load_pl(data.get('acc'), sec_cb.get())
 
-        # --- OTHER WIDGETS ---
+        # --- NEW CHANGE: HÀM THÊM MỚI TÀI KHOẢN (+) ---
         def qa():
             s = sec_cb.get()
             if not s: self.popup_error("Err", "Select Secret"); return
             def t():
-                n, e = youtube_api.create_new_login(s)
-                if n: self.after(0, lambda: [self.refresh_global_ui(), self.popup_info("OK", f"Added {n}"), acc_cb.set(n), load_pl(n, s)])
+                n, e = youtube_api.create_new_login(s) # n là tên file token
+                if n: 
+                    # Logic kiểm tra sau khi đăng nhập thành công
+                    def check_and_set():
+                        # 1. Quét xem file n này có đang dùng ở dòng nào không
+                        used_in_row = None
+                        for r in self.row_frames:
+                             if r['acc'].get() == n:
+                                 used_in_row = r['lbl_idx'].cget('text')
+                                 break
+                        
+                        self.refresh_global_ui() # Làm mới list trước
+
+                        if used_in_row:
+                            self.popup_error("Exists", f"Login successful but Account '{n}' is already used at Row {used_in_row}.")
+                            # Không set vào ô này để tránh trùng
+                        else:
+                            self.popup_info("OK", f"Added New Account: {n}")
+                            acc_cb.set(n)
+                            load_pl(n, s)
+
+                    self.after(0, check_and_set)
+
             threading.Thread(target=t, daemon=True).start()
+
         ttk.Button(fr, text="+", width=3, bootstyle="primary-outline", command=qa).pack(side=LEFT, padx=(0,5))
 
+        # --- (PHẦN CÒN LẠI GIỮ NGUYÊN) ---
         tm = ttk.Entry(fr, width=33, justify="center"); tm.pack(side=LEFT, padx=2); tm.insert(0, data.get('time', "08:00, 19:00"))
         gap = ttk.Spinbox(fr, from_=0, to=30, width=5, justify="center"); gap.pack(side=LEFT, padx=2); gap.set(data.get('gap', 0))
         cat = ttk.Combobox(fr, state="readonly", values=list(config.YT_CATEGORIES.keys()), width=25); cat.pack(side=LEFT, padx=2)
@@ -549,16 +568,15 @@ class AutoYoutubeApp(ttk.Window):
             for i,r in enumerate(self.row_frames): r['lbl_idx'].config(text=str(i+1))
         ttk.Button(fr, text="X", width=4, bootstyle="primary-outline", command=dele).pack(side=LEFT, padx=5)
 
-        # --- QUAN TRỌNG: LƯU BIẾN VÀO DICT ĐỂ DÙNG SAU ---
         row_widgets = {
             'frame': fr, 'lbl_idx': lbl_idx, 'chk': chk_var, 
             'secret': sec_cb, 'folder': fol_ent, 'acc': acc_cb, 
-            'playlist': playlist_ent,   # Lưu widget Entry
-            'playlist_data': row_data,  # Lưu dữ liệu danh sách ID
+            'playlist': playlist_ent, 'playlist_data': row_data, 
             'time': tm, 'gap': gap, 'cat': cat, 'stat': stat, 
             'pause_event': pe, 'btn_pause': bp, 'running': False
         }
         self.row_frames.append(row_widgets)
+
     def browse_folder(self, entry, idx):
         d = filedialog.askdirectory()
         if d:
@@ -626,62 +644,170 @@ class AutoYoutubeApp(ttk.Window):
     # MANAGERS
     # =========================================================================
     def open_batch_add(self):
+        # 1. Kiểm tra quyền và đóng các cửa sổ cũ
         if not self.check_access(): return
+        self.close_all_popups()
         
-        # 1. Đóng các popup khác đang mở
-        self.close_all_popups() 
-        
-        # 2. QUAN TRỌNG: Gán cửa sổ vào biến self.win_batch_add để quản lý
+        # 2. Khởi tạo cửa sổ Batch Add
         self.win_batch_add = ttk.Toplevel(self)
-        w = self.win_batch_add # Dùng biến w cho gọn để code dưới không phải sửa
+        w = self.win_batch_add
+        w.title("Batch Add Rows")
+        w.geometry("500x600")
+        self._center_window(w)
         
-        w.title("Batch Add"); w.geometry("500x550"); self._center_window(w)
+        # --- PHẦN 1: CHỌN SECRET ---
+        ttk.Label(w, text="1. Select Secret (Client config):", font=("Bold", 10)).pack(anchor=W, padx=10, pady=(15, 5))
         
-        ttk.Label(w, text="1. Select Secret:", font=("Bold", 10)).pack(anchor=W, padx=10, pady=10)
-        secs = [os.path.basename(f) for f in glob.glob(os.path.join(config.SECRET_DIR, "*.json"))]
-        sb = ttk.Combobox(w, values=secs, state="readonly"); sb.pack(fill=X, padx=10)
+        # Lấy danh sách file secret
+        try:
+            secs = [os.path.basename(f) for f in glob.glob(os.path.join(config.SECRET_DIR, "*.json"))]
+        except: 
+            secs = []
+            
+        sb_secret = ttk.Combobox(w, values=secs, state="readonly", bootstyle="primary")
+        sb_secret.pack(fill=X, padx=10)
         
-        ttk.Label(w, text="2. Accounts:", font=("Bold", 10)).pack(anchor=W, padx=10, pady=10)
-        lf = ScrolledFrame(w, height=250); lf.pack(fill=BOTH, expand=True, padx=10)
-        b_vars = []
+        # --- PHẦN 2: DANH SÁCH TÀI KHOẢN ---
+        ttk.Label(w, text="2. Select Accounts to Add:", font=("Bold", 10)).pack(anchor=W, padx=10, pady=(15, 5))
         
-        def ld(e=None):
-            for c in lf.winfo_children(): c.destroy()
-            b_vars.clear(); s = sb.get()
-            if not s: return
-            cid = youtube_api.get_client_id_from_file(s)
-            if not cid: return
-            for f in glob.glob(os.path.join(config.TOKEN_DIR, "*.json")):
+        # Khung cuộn chứa Checkbox tài khoản
+        list_frame = ScrolledFrame(w, height=300)
+        list_frame.pack(fill=BOTH, expand=True, padx=10, pady=5)
+        
+        # Biến lưu trữ các Checkbox: list chứa tuple (account_filename, variable)
+        batch_vars = []
+        
+        def load_accounts_for_secret(event=None):
+            # Xóa danh sách cũ
+            for widget in list_frame.winfo_children():
+                widget.destroy()
+            batch_vars.clear()
+            
+            secret_file = sb_secret.get()
+            if not secret_file: return
+            
+            # Lấy Client ID từ file Secret để lọc Account tương ứng
+            cid = youtube_api.get_client_id_from_file(secret_file)
+            if not cid:
+                ttk.Label(list_frame, text="Invalid Secret File", foreground="red").pack()
+                return
+            
+            # Tìm các file token khớp với Client ID
+            found_count = 0
+            for token_path in glob.glob(os.path.join(config.TOKEN_DIR, "*.json")):
                 try:
-                    if json.load(open(f)).get("client_id") == cid:
-                        n = os.path.basename(f); v = tk.BooleanVar(value=True)
-                        ttk.Checkbutton(lf, text=n, variable=v).pack(anchor=W)
-                        b_vars.append((n,v))
+                    with open(token_path, 'r') as f:
+                        data = json.load(f)
+                        if data.get("client_id") == cid:
+                            acc_name = os.path.basename(token_path)
+                            
+                            # Tạo Checkbox
+                            var = tk.BooleanVar(value=True) # Mặc định chọn tất cả
+                            
+                            # Kiểm tra visual: Nếu account này đã có trên Grid thì đánh dấu màu xám (Optional UX)
+                            # Nhưng logic chính vẫn nằm ở nút Add
+                            display_text = acc_name
+                            
+                            chk = ttk.Checkbutton(list_frame, text=display_text, variable=var)
+                            chk.pack(anchor=W, pady=2)
+                            
+                            batch_vars.append((acc_name, var))
+                            found_count += 1
                 except: pass
-        sb.bind("<<ComboboxSelected>>", ld)
+                
+            if found_count == 0:
+                ttk.Label(list_frame, text="No accounts found linked to this secret.", foreground="gray").pack(pady=10)
+
+        # Gán sự kiện khi chọn Secret
+        sb_secret.bind("<<ComboboxSelected>>", load_accounts_for_secret)
         
-        def qa():
-            s = sb.get()
-            if not s: self.popup_error("Err", "No Secret"); return
-            def t():
-                n, e = youtube_api.create_new_login(s)
-                if n: self.after(0, lambda: [ld(), self.refresh_global_ui(), self.popup_info("OK", f"Added {n}")])
-            threading.Thread(target=t, daemon=True).start()
-        ttk.Button(w, text="+ New Login", command=qa, bootstyle="primary-outline").pack(fill=X, padx=10, pady=5)
+        # --- PHẦN 3: NÚT THÊM LOGIN MỚI ---
+        def add_new_login():
+            s = sb_secret.get()
+            if not s: 
+                self.popup_error("Error", "Please select a Secret file first.")
+                return
+            
+            def thread_login():
+                # Chạy login trên luồng riêng
+                new_acc, err = youtube_api.create_new_login(s)
+                if new_acc:
+                    # Login thành công -> Refresh lại list để hiện tài khoản mới
+                    self.after(0, lambda: [
+                        load_accounts_for_secret(), # Tải lại danh sách
+                        self.refresh_global_ui(),   # Đồng bộ UI chính
+                        self.popup_info("Success", f"Added new account: {new_acc}")
+                    ])
+                else:
+                    self.after(0, lambda: self.popup_error("Login Failed", f"Could not login.\n{err}"))
+            
+            threading.Thread(target=thread_login, daemon=True).start()
+
+        ttk.Button(w, text="+ Login New Account", command=add_new_login, bootstyle="info-outline").pack(fill=X, padx=10, pady=5)
         
-        def cf():
-            s = sb.get(); acs = [n for n,v in b_vars if v.get()]
-            if not s or not acs: self.popup_error("Err", "Missing Info"); return
-            exist = set()
-            for r in self.row_frames: 
-                if r['secret'].get() and r['acc'].get(): exist.add((r['secret'].get(), r['acc'].get()))
-            cnt = 0
-            for a in acs:
-                if (s,a) in exist: continue
-                self.add_row({"secret": s, "acc": a, "chk": True})
-                cnt+=1; exist.add((s,a))
-            w.destroy(); self.popup_info("OK", f"Batch Added {cnt} rows."); self.update_master_state()
-        ttk.Button(w, text="ADD TO GRID", bootstyle="primary", command=cf).pack(fill=X, padx=10, pady=10)
+        # --- PHẦN 4: NÚT XÁC NHẬN (ADD TO GRID) ---
+        def confirm_add_to_grid():
+            secret_val = sb_secret.get()
+            # Lấy danh sách các account được tích chọn
+            selected_accs = [name for name, var in batch_vars if var.get()]
+            
+            if not secret_val:
+                self.popup_error("Error", "Please select a Secret.")
+                return
+            if not selected_accs:
+                self.popup_error("Error", "Please select at least one Account.")
+                return
+            
+            # --- LOGIC KIỂM TRA TRÙNG LẶP ---
+            # 1. Tạo tập hợp các account đang tồn tại trên Grid
+            current_grid_accounts = set()
+            for r in self.row_frames:
+                acc_val = r['acc'].get()
+                if acc_val:
+                    current_grid_accounts.add(acc_val)
+            
+            added_count = 0
+            skipped_list = []
+            
+            for acc in selected_accs:
+                # 2. Nếu account đã có trên Grid -> Bỏ qua
+                if acc in current_grid_accounts:
+                    skipped_list.append(acc)
+                else:
+                    # 3. Nếu chưa có -> Thêm dòng mới
+                    self.add_row({
+                        "secret": secret_val,
+                        "acc": acc,
+                        "chk": True # Mặc định tick chọn dòng mới
+                    })
+                    added_count += 1
+                    # Thêm vào set tạm thời để tránh trường hợp file bị duplicate ngay trong list chọn
+                    current_grid_accounts.add(acc)
+            
+            # --- KẾT THÚC ---
+            w.destroy()
+            self.update_master_state() # Cập nhật checkbox tổng
+            
+            # Tạo thông báo kết quả
+            msg = f"Successfully added {added_count} rows."
+            
+            if skipped_list:
+                msg += f"\n\n⚠ Skipped {len(skipped_list)} accounts (Already on Grid):\n"
+                # Liệt kê tối đa 5 account bị trùng để user biết
+                preview = skipped_list[:5]
+                for s_acc in preview:
+                    msg += f"- {s_acc}\n"
+                if len(skipped_list) > 5:
+                    msg += f"... and {len(skipped_list)-5} others."
+            
+            if skipped_list and added_count == 0:
+                self.popup_error("Batch Result", msg) # Dùng icon lỗi nếu không thêm được dòng nào
+            else:
+                self.popup_info("Batch Result", msg)
+
+        # Nút hành động chính
+        ttk.Separator(w, orient=HORIZONTAL).pack(fill=X, pady=10)
+        ttk.Button(w, text="ADD TO GRID", bootstyle="success", command=confirm_add_to_grid).pack(fill=X, padx=10, pady=(0, 20))
 
     def open_settings(self):
         if not self.check_access(): return
@@ -722,32 +848,24 @@ class AutoYoutubeApp(ttk.Window):
         ttk.Button(fr, text="SAVE CONFIG", bootstyle="primary", command=sv).pack(fill=X)
 
     def open_secret_manager(self):
-        # 1. Đóng các popup khác (để đảm bảo chỉ 1 cửa sổ mở)
         self.close_all_popups()
         
-        # 2. Khởi tạo cửa sổ
         self.win_secrets = ttk.Toplevel(self)
         self.win_secrets.title("Secrets Manager (Multi-Select)")
         self.win_secrets.geometry("500x500")
         self._center_window(self.win_secrets)
         
-        # 3. Listbox: Thêm selectmode="extended" để chọn nhiều
         lb = tk.Listbox(self.win_secrets, font=("Helvetica", 10), selectmode="extended")
         lb.pack(fill=BOTH, expand=True, padx=10, pady=10)
         
         def rf(): 
             lb.delete(0, tk.END)
-            # Load danh sách file trong thư mục secret
             for f in glob.glob(os.path.join(config.SECRET_DIR, "*.json")): 
                 lb.insert(tk.END, os.path.basename(f))
             self.refresh_global_ui() 
             
         def ad(): 
-            # 4. Import: Dùng askopenfilenames (có 's' ở cuối) để chọn nhiều file
-            files = filedialog.askopenfilenames(
-                title="Select Secret Files",
-                filetypes=[("JSON Files", "*.json")]
-            )
+            files = filedialog.askopenfilenames(title="Select Secret Files", filetypes=[("JSON Files", "*.json")])
             if files:
                 count = 0
                 for f in files:
@@ -755,19 +873,14 @@ class AutoYoutubeApp(ttk.Window):
                         shutil.copy(f, config.SECRET_DIR)
                         count += 1
                     except: pass
-                
                 if count > 0:
-                    rf() # Làm mới danh sách
-                    self.popup_info("Import Success", f"Successfully imported {count} files.")
+                    rf(); self.popup_info("Import Success", f"Successfully imported {count} files.")
             
         def de():
-            # 5. Delete: Xử lý xóa nhiều file cùng lúc
             selection = lb.curselection()
             if not selection: return
             
-            # Lấy danh sách tên file từ các dòng đã chọn
             files_to_delete = [lb.get(i) for i in selection]
-            
             msg = f"Are you sure you want to delete {len(files_to_delete)} secret file(s)?\n\nWARNING: All linked Accounts will also be deleted!"
             
             if self.popup_confirm("Batch Delete", msg):
@@ -775,37 +888,46 @@ class AutoYoutubeApp(ttk.Window):
                 deleted_acc = 0
                 
                 for fn in files_to_delete:
-                    # Lấy Client ID để tìm Token liên quan trước khi xóa file
-                    cid = youtube_api.get_client_id_from_file(fn)
-                    secret_path = os.path.join(config.SECRET_DIR, fn)
-                    
-                    # Xóa file Secret
-                    if os.path.exists(secret_path):
-                        try:
-                            os.remove(secret_path)
-                            deleted_sec += 1
-                        except: continue
+                    # --- XỬ LÝ AN TOÀN TỪNG FILE ---
+                    try:
+                        # 1. Lấy Client ID (Bọc try/except để tránh crash nếu file lỗi)
+                        cid = None
+                        try: cid = youtube_api.get_client_id_from_file(fn) 
+                        except: pass 
+                        
+                        # 2. Xóa file Secret
+                        secret_path = os.path.join(config.SECRET_DIR, fn)
+                        if os.path.exists(secret_path):
+                            try:
+                                os.remove(secret_path)
+                                deleted_sec += 1
+                            except: pass # Nếu file đang mở bởi app khác thì bỏ qua
 
-                    # Xóa các Token liên quan đến Secret này
-                    if cid:
-                        for af in glob.glob(os.path.join(config.TOKEN_DIR, "*.json")):
-                            try: 
-                                if json.load(open(af)).get("client_id") == cid: 
-                                    os.remove(af)
-                                    deleted_acc += 1
-                            except: pass
+                        # 3. Xóa các Token liên quan (QUAN TRỌNG: Đóng file trước khi xóa)
+                        if cid:
+                            for af in glob.glob(os.path.join(config.TOKEN_DIR, "*.json")):
+                                try:
+                                    should_delete = False
+                                    # Dùng 'with' để file tự động đóng ngay sau khi đọc xong
+                                    with open(af, 'r') as f:
+                                        if json.load(f).get("client_id") == cid:
+                                            should_delete = True
+                                    
+                                    # Chỉ xóa khi file đã đóng hoàn toàn
+                                    if should_delete:
+                                        os.remove(af)
+                                        deleted_acc += 1
+                                except: pass
+                    except Exception:
+                        continue # Đảm bảo luôn chạy tiếp sang file sau dù có lỗi
                 
-                rf() # Làm mới danh sách
+                rf() 
                 self.popup_info("Delete Complete", f"Deleted {deleted_sec} Secrets and {deleted_acc} linked Accounts.")
                 
         bf = ttk.Frame(self.win_secrets)
         bf.pack(fill=X, padx=10, pady=10)
-        
-        # Nút Import
         ttk.Button(bf, text="+ Import (Multi)", command=ad, bootstyle="success").pack(side=LEFT, fill=X, expand=True, padx=5)
-        # Nút Delete
         ttk.Button(bf, text="- Delete Selected", command=de, bootstyle="danger").pack(side=RIGHT, fill=X, expand=True, padx=5)
-        
         rf()
 
     def close_all_popups(self):
@@ -832,53 +954,45 @@ class AutoYoutubeApp(ttk.Window):
             setattr(self, attr, None)
 
     def open_acc_manager(self):
-        # 1. Đóng các popup khác trước
         self.close_all_popups()
         
-        # 2. Khởi tạo cửa sổ
         self.win_accounts = ttk.Toplevel(self)
         self.win_accounts.title("Accounts Manager (Multi-Select)")
         self.win_accounts.geometry("450x450")
         self._center_window(self.win_accounts)
         
-        # 3. Listbox: Thêm selectmode="extended" để chọn nhiều
         lb = tk.Listbox(self.win_accounts, font=("Helvetica", 10), selectmode="extended")
         lb.pack(fill=BOTH, expand=True, padx=10, pady=10)
         
         def rf(): 
             lb.delete(0, tk.END)
-            # Liệt kê file token
             for f in glob.glob(os.path.join(config.TOKEN_DIR, "*.json")): 
                 lb.insert(tk.END, os.path.basename(f))
-            
-            # Cập nhật lại Grid bên ngoài (nếu lỡ xóa file đang dùng thì grid tự reset)
             self.refresh_global_ui()
             
         def de():
-            # 4. Xử lý xóa nhiều file
             selection = lb.curselection()
             if not selection: return
             
-            # Lấy danh sách tên file từ các dòng được chọn
             files_to_delete = [lb.get(i) for i in selection]
-            
             msg = f"Are you sure you want to delete {len(files_to_delete)} account(s)?"
             
             if self.popup_confirm("Batch Delete", msg):
                 count = 0
                 for fname in files_to_delete:
-                    path = os.path.join(config.TOKEN_DIR, fname)
+                    # Bọc try/except từng file để đảm bảo vòng lặp không bị ngắt
                     try:
-                        os.remove(path)
-                        count += 1
-                    except: pass
+                        path = os.path.join(config.TOKEN_DIR, fname)
+                        if os.path.exists(path):
+                            os.remove(path)
+                            count += 1
+                    except Exception:
+                        pass # Nếu không xóa được (do đang chạy chẳng hạn), bỏ qua
                 
-                rf() # Làm mới danh sách
+                rf()
                 self.popup_info("Delete Complete", f"Successfully deleted {count} accounts.")
                 
-        # Nút Xóa (Màu đỏ)
         ttk.Button(self.win_accounts, text="Delete Selected", command=de, bootstyle="danger").pack(pady=10, fill=X, padx=20)
-        
         rf()
 
     def open_admin_panel(self):
